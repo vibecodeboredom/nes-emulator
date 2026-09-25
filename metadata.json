@@ -1,0 +1,6 @@
+{
+  "name": "NES Emulator",
+  "description": "A simple NES emulator featuring Super Mario Bros., Mario Bros., and Fami Dash with custom ROM support, audio, gamepad, and touch controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
