@@ -58,6 +58,9 @@ export default function App() {
   const [infiniteJump, setInfiniteJump] = useState(false);
   const [autoEnemyScramble, setAutoEnemyScramble] = useState(false);
   const [autoEnemyScrambleSpeed, setAutoEnemyScrambleSpeed] = useState(2.0);
+  const [autoStreamRandomize, setAutoStreamRandomize] = useState(false);
+  const [autoStreamRandomizeSpeed, setAutoStreamRandomizeSpeed] = useState(2.0);
+  const [emulationSpeed, setEmulationSpeed] = useState(1.0);
   const [currentPowerup, setCurrentPowerup] = useState<PowerupType>('small');
   const [corruptionPower, setCorruptionPower] = useState(5);
   const [worldLevelInfo, setWorldLevelInfo] = useState<WorldLevelInfo | null>(null);
@@ -103,12 +106,22 @@ export default function App() {
     corrupt: () => void;
     garbageCorrupt: () => void;
     infJump: () => void;
+    reset: () => void;
+    mergeLevel: () => void;
+    spawnFlag: () => void;
+    spawnHammer: () => void;
+    randomWarp: () => void;
   }>({
     save: () => {},
     load: () => {},
     corrupt: () => {},
     garbageCorrupt: () => {},
     infJump: () => {},
+    reset: () => {},
+    mergeLevel: () => {},
+    spawnFlag: () => {},
+    spawnHammer: () => {},
+    randomWarp: () => {},
   });
 
   // Initialize engine once
@@ -129,6 +142,15 @@ export default function App() {
       onQuickCorrupt: () => handlersRef.current.corrupt(),
       onQuickGarbageCorrupt: () => handlersRef.current.garbageCorrupt(),
       onQuickInfJump: () => handlersRef.current.infJump(),
+      onQuickReset: () => handlersRef.current.reset(),
+      onQuickMergeLevelData: () => handlersRef.current.mergeLevel(),
+      onQuickSpawnFlag: () => handlersRef.current.spawnFlag(),
+      onQuickSpawnHammer: () => handlersRef.current.spawnHammer(),
+      onQuickRandomWarp: () => handlersRef.current.randomWarp(),
+      onSpeedChange: (newSpeed) => {
+        setEmulationSpeed(newSpeed);
+        showToast(`Speedhack: ${newSpeed}x ${newSpeed === 1.0 ? 'Normal' : newSpeed > 1.0 ? 'Fast Forward' : 'Slow Motion'}`);
+      },
       onWorldLevelChange: (info) => {
         setWorldLevelInfo(info);
         if (engineRef.current) {
@@ -160,7 +182,7 @@ export default function App() {
     }
   }, [isFullscreen]);
 
-  const loadGameRom = async (rom: RomInfo) => {
+  const loadGameRom = useCallback(async (rom: RomInfo) => {
     if (!engineRef.current) return;
     setStatus('loading');
     setCurrentRom(rom);
@@ -205,13 +227,22 @@ export default function App() {
       if (infiniteHealth) {
         engineRef.current.setInfiniteHealth(true);
       }
+      if (autoEnemyScramble) {
+        engineRef.current.setAutoEnemyScramble(true, autoEnemyScrambleSpeed, 5);
+      }
+      if (autoStreamRandomize) {
+        engineRef.current.setAutoStreamRandomize(true, autoStreamRandomizeSpeed, corruptionPower);
+      }
+      if (emulationSpeed !== 1.0) {
+        engineRef.current.setSpeed(emulationSpeed);
+      }
       showToast(`Loaded: ${rom.title}`);
     } catch (err) {
       console.error('Failed to load ROM:', err);
       setStatus('error');
       showToast(`Failed to load ${rom.title}`);
     }
-  };
+  }, [infiniteHealth, autoEnemyScramble, autoEnemyScrambleSpeed, autoStreamRandomize, autoStreamRandomizeSpeed, corruptionPower, emulationSpeed, refreshSaveStateInfo, showToast]);
 
   const handleCustomFileSelected = async (file: File) => {
     if (!engineRef.current) return;
@@ -248,11 +279,27 @@ export default function App() {
     }
   };
 
-  const handleReset = () => {
+  const handleReset = useCallback(async () => {
     if (!engineRef.current) return;
-    engineRef.current.reset();
-    showToast('NES Console Reset');
-  };
+    try {
+      setStatus('loading');
+      if (engineRef.current.hasOriginalRom()) {
+        await engineRef.current.reloadRom();
+      } else {
+        await loadGameRom(currentRom);
+      }
+      if (infiniteHealth) {
+        engineRef.current.setInfiniteHealth(true);
+      }
+      if (infiniteJump) {
+        engineRef.current.setInfiniteJump(true);
+      }
+      showToast(`Game Reloaded: ${currentRom.title} [J]`);
+    } catch (err) {
+      console.error('Reset/reload error:', err);
+      await loadGameRom(currentRom);
+    }
+  }, [currentRom, infiniteHealth, infiniteJump, loadGameRom, showToast]);
 
   const handleToggleMute = () => {
     if (!engineRef.current) return;
@@ -363,7 +410,7 @@ export default function App() {
   const handleTriggerInfiniteJump = useCallback(() => {
     if (!engineRef.current) return;
     engineRef.current.triggerInfiniteJump();
-    showToast('Air Jump Boost! [J]');
+    showToast('Air Jump Boost! [K]');
   }, [showToast]);
 
   const handleChangePowerup = useCallback(
@@ -439,6 +486,49 @@ export default function App() {
     [autoEnemyScramble, showToast]
   );
 
+  const handleToggleAutoStreamRandomize = useCallback(
+    (enabled: boolean) => {
+      setAutoStreamRandomize(enabled);
+      if (engineRef.current) {
+        engineRef.current.setAutoStreamRandomize(enabled, autoStreamRandomizeSpeed, corruptionPower);
+      }
+      showToast(
+        enabled
+          ? `Auto Randomize Level Stream ON (${autoStreamRandomizeSpeed}s interval)`
+          : 'Auto Randomize Level Stream OFF'
+      );
+    },
+    [autoStreamRandomizeSpeed, corruptionPower, showToast]
+  );
+
+  const handleChangeAutoStreamRandomizeSpeed = useCallback(
+    (speed: number) => {
+      const rounded = speed < 0.1 ? Math.round(speed * 100) / 100 : Math.round(speed * 10) / 10;
+      setAutoStreamRandomizeSpeed(rounded);
+      if (engineRef.current) {
+        engineRef.current.setAutoStreamRandomize(autoStreamRandomize, rounded, corruptionPower);
+      }
+      if (autoStreamRandomize) {
+        showToast(`Auto Stream Randomize Interval: ${rounded}s`);
+      }
+    },
+    [autoStreamRandomize, corruptionPower, showToast]
+  );
+
+  const handleChangeSpeed = useCallback(
+    (speed: number) => {
+      const rounded = Math.round(speed * 100) / 100;
+      setEmulationSpeed(rounded);
+      engineRef.current?.setSpeed(rounded);
+      showToast(
+        `Speedhack: ${rounded}x ${
+          rounded === 1.0 ? 'Normal Speed' : rounded > 1.0 ? 'Fast Forward' : 'Slow Motion'
+        }`
+      );
+    },
+    [showToast]
+  );
+
   const handleCorrupt = useCallback(() => {
     if (!engineRef.current) return;
     const modified = engineRef.current.corrupt(corruptionPower);
@@ -447,9 +537,9 @@ export default function App() {
 
   const handleCorruptGarbage = useCallback(() => {
     if (!engineRef.current) return;
-    const modified = engineRef.current.corruptGarbage(80);
-    showToast(`Garbage Corruption! [H] (${modified} bits randomized)`);
-  }, [showToast]);
+    const modified = engineRef.current.corruptGarbage(corruptionPower);
+    showToast(`Garbage Glitch Corruption! [H] (${modified} bits & glitch entities modified, Power ${corruptionPower})`);
+  }, [corruptionPower, showToast]);
 
   const handleReplaceLevelData = useCallback(
     (world: number, level: number) => {
@@ -464,6 +554,70 @@ export default function App() {
     [showToast]
   );
 
+  const handleQuickMergeLevel = useCallback(() => {
+    if (!engineRef.current) return;
+    const res = engineRef.current.quickMergeLevel();
+    if (res.success) {
+      showToast(
+        `✨ Level Merge [M]: ${res.levelA.name} (${res.areaTypeA}) + ${res.levelB.name} (${res.areaTypeB})! (${res.objectsMerged} obj, ${res.enemiesMerged} enemies)`
+      );
+    } else {
+      showToast(`Merge failed: ${res.message}`);
+    }
+  }, [showToast]);
+
+  const handleCustomMergeLevel = useCallback(
+    (
+      worldA: number,
+      levelA: number,
+      worldB: number,
+      levelB: number,
+      mode: 'interleave' | 'overlay' | 'chaos' = 'interleave'
+    ) => {
+      if (!engineRef.current) return;
+      const res = engineRef.current.mergeLevelData(worldA, levelA, worldB, levelB, mode);
+      if (res.success) {
+        showToast(
+          `✨ Level Merge: ${res.levelA.name} (${res.areaTypeA}) + ${res.levelB.name} (${res.areaTypeB})! (${res.objectsMerged} obj, ${res.enemiesMerged} enemies)`
+        );
+      } else {
+        showToast(`Merge failed: ${res.message}`);
+      }
+    },
+    [showToast]
+  );
+
+  const handleSpawnFlag = useCallback(() => {
+    if (!engineRef.current) return;
+    const res = engineRef.current.spawnFlagAhead(5);
+    if (res.success) {
+      showToast(res.message);
+    } else {
+      showToast('Could not spawn flag: ' + res.message);
+    }
+  }, [showToast]);
+
+  const handleSpawnHammer = useCallback(() => {
+    if (!engineRef.current) return;
+    const res = engineRef.current.spawnHammerAhead(5);
+    if (res.success) {
+      showToast(res.message);
+    } else {
+      showToast('Could not spawn hammer: ' + res.message);
+    }
+  }, [showToast]);
+
+  const handleRandomWarp = useCallback(() => {
+    if (!engineRef.current) return;
+    const res = engineRef.current.warpToRandomLevel();
+    if (res.success) {
+      const dispW = res.world === 36 ? '-1 (Minus World)' : `${res.world}`;
+      showToast(`🌀 Random Warp [T]: Warped to World ${dispW}-${res.level}!`);
+    } else {
+      showToast('Random warp failed: ' + res.message);
+    }
+  }, [showToast]);
+
   // Keep hotkey callbacks current with active states
   useEffect(() => {
     handlersRef.current = {
@@ -472,8 +626,13 @@ export default function App() {
       corrupt: handleCorrupt,
       garbageCorrupt: handleCorruptGarbage,
       infJump: handleTriggerInfiniteJump,
+      reset: handleReset,
+      mergeLevel: handleQuickMergeLevel,
+      spawnFlag: handleSpawnFlag,
+      spawnHammer: handleSpawnHammer,
+      randomWarp: handleRandomWarp,
     };
-  }, [handleSaveState, handleLoadState, handleCorrupt, handleCorruptGarbage, handleTriggerInfiniteJump]);
+  }, [handleSaveState, handleLoadState, handleCorrupt, handleCorruptGarbage, handleTriggerInfiniteJump, handleReset, handleQuickMergeLevel, handleSpawnFlag, handleSpawnHammer, handleRandomWarp]);
 
   const handleTakeScreenshot = () => {
     if (!engineRef.current) return;
@@ -511,7 +670,7 @@ export default function App() {
   }, []);
 
   return (
-    <main className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col items-center justify-start p-3 sm:p-5 relative font-sans antialiased selection:bg-red-600 selection:text-white">
+    <main className="min-h-screen bg-white text-zinc-900 flex flex-col items-center justify-start p-3 sm:p-5 relative font-sans antialiased selection:bg-red-600 selection:text-white">
       {/* Toast Notification */}
       {toastMessage && (
         <div
@@ -528,8 +687,8 @@ export default function App() {
         {/* Minimalist Top Bar */}
         <header className="w-full flex items-center justify-between px-1">
           <div className="flex items-center gap-2.5">
-            <div className="w-3 h-3 rounded-full bg-red-600 shadow-[0_0_8px_rgba(220,38,38,0.9)] animate-pulse" />
-            <h1 className="text-sm font-black tracking-widest text-zinc-100 uppercase font-mono">
+            <div className="w-3 h-3 rounded-full bg-red-600 shadow-[0_0_8px_rgba(220,38,38,0.7)] animate-pulse" />
+            <h1 className="text-sm font-black tracking-widest text-zinc-900 uppercase font-mono">
               NES EMULATOR
             </h1>
           </div>
@@ -539,10 +698,10 @@ export default function App() {
               id="header-help-btn"
               type="button"
               onClick={() => setShowControlsModal(true)}
-              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-zinc-400 hover:text-zinc-100 bg-zinc-900 hover:bg-zinc-850 border border-zinc-800 rounded-lg transition-colors"
+              className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-950 bg-zinc-100 hover:bg-zinc-200 border border-zinc-300 rounded-lg transition-colors shadow-xs"
             >
-              <Info className="w-3.5 h-3.5 text-zinc-400" />
-              <span className="hidden sm:inline">Controls</span>
+              <Info className="w-3.5 h-3.5 text-zinc-600" />
+              <span className="hidden sm:inline">Controls & Hotkeys</span>
             </button>
           </div>
         </header>
@@ -563,6 +722,7 @@ export default function App() {
           isFullscreen={isFullscreen}
           fps={fps}
           currentGameTitle={currentRom.title}
+          emulationSpeed={emulationSpeed}
           onTogglePause={handleTogglePlay}
           onToggleFullscreen={handleToggleFullscreen}
           onFileDrop={handleCustomFileSelected}
@@ -580,6 +740,8 @@ export default function App() {
           infiniteJump={infiniteJump}
           currentPowerup={currentPowerup}
           corruptionPower={corruptionPower}
+          emulationSpeed={emulationSpeed}
+          onChangeSpeed={handleChangeSpeed}
           onTogglePlay={handleTogglePlay}
           onReset={handleReset}
           onToggleMute={handleToggleMute}
@@ -596,6 +758,10 @@ export default function App() {
           onChangeCorruptionPower={setCorruptionPower}
           onCorrupt={handleCorrupt}
           onCorruptGarbage={handleCorruptGarbage}
+          onQuickMerge={handleQuickMergeLevel}
+          onSpawnFlag={handleSpawnFlag}
+          onSpawnHammer={handleSpawnHammer}
+          onRandomWarp={handleRandomWarp}
           showVirtualGamepad={showVirtualGamepad}
           onToggleVirtualGamepad={() => setShowVirtualGamepad((prev) => !prev)}
         />
@@ -603,13 +769,24 @@ export default function App() {
         {/* Live Level Tools, Replacer, Warp & Live Level Corruptor */}
         <LiveWorldChanger
           currentInfo={worldLevelInfo}
+          corruptionPower={corruptionPower}
+          onChangeCorruptionPower={setCorruptionPower}
+          onCorruptGarbage={handleCorruptGarbage}
           onReplaceLevelData={handleReplaceLevelData}
           onWarp={handleWarp}
+          onRandomWarp={handleRandomWarp}
           onCorruptLiveLevel={handleCorruptLiveLevel}
+          onMergeLevels={handleCustomMergeLevel}
+          onSpawnFlag={handleSpawnFlag}
+          onSpawnHammer={handleSpawnHammer}
           autoEnemyScramble={autoEnemyScramble}
           autoEnemyScrambleSpeed={autoEnemyScrambleSpeed}
           onToggleAutoEnemyScramble={handleToggleAutoEnemyScramble}
           onChangeAutoEnemyScrambleSpeed={handleChangeAutoEnemyScrambleSpeed}
+          autoStreamRandomize={autoStreamRandomize}
+          autoStreamRandomizeSpeed={autoStreamRandomizeSpeed}
+          onToggleAutoStreamRandomize={handleToggleAutoStreamRandomize}
+          onChangeAutoStreamRandomizeSpeed={handleChangeAutoStreamRandomizeSpeed}
           disabled={status !== 'running' && status !== 'paused'}
         />
 

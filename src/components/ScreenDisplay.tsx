@@ -1,5 +1,5 @@
 import React, { useRef, useEffect } from 'react';
-import { Play, Upload, Maximize2, Minimize2, Tv } from 'lucide-react';
+import { Play, Upload, Maximize2, Minimize2, Tv, Zap, Clock } from 'lucide-react';
 import { EmulatorStatus } from '../types';
 
 interface ScreenDisplayProps {
@@ -9,6 +9,7 @@ interface ScreenDisplayProps {
   isFullscreen: boolean;
   fps: number;
   currentGameTitle: string;
+  emulationSpeed?: number;
   onTogglePause: () => void;
   onToggleFullscreen: () => void;
   onFileDrop: (file: File) => void;
@@ -21,6 +22,7 @@ export const ScreenDisplay: React.FC<ScreenDisplayProps> = ({
   isFullscreen,
   fps,
   currentGameTitle,
+  emulationSpeed = 1.0,
   onTogglePause,
   onToggleFullscreen,
   onFileDrop,
@@ -55,9 +57,9 @@ export const ScreenDisplay: React.FC<ScreenDisplayProps> = ({
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
-      className={`relative mx-auto flex flex-col items-center justify-center rounded-xl bg-zinc-950 p-2 sm:p-3.5 shadow-2xl border border-zinc-800 transition-all ${
+      className={`relative mx-auto flex flex-col items-center justify-center rounded-2xl bg-zinc-950 p-2 sm:p-3.5 shadow-xl border border-zinc-300 transition-all ${
         isFullscreen
-          ? 'fixed inset-0 z-50 h-screen w-screen max-w-none rounded-none p-4'
+          ? 'fixed inset-0 z-50 h-screen w-screen max-w-none rounded-none p-4 border-0'
           : 'w-full max-w-[680px]'
       }`}
     >
@@ -76,7 +78,22 @@ export const ScreenDisplay: React.FC<ScreenDisplayProps> = ({
           <span className="font-semibold text-zinc-200 truncate">{currentGameTitle}</span>
         </div>
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-2.5 shrink-0">
+          {emulationSpeed !== 1.0 && (
+            <span
+              id="screen-speed-badge"
+              className={`text-[10px] font-bold px-1.5 py-0.5 rounded font-mono flex items-center gap-1 ${
+                emulationSpeed > 1.0
+                  ? 'bg-amber-500/25 text-amber-300 border border-amber-500/40 animate-pulse'
+                  : 'bg-cyan-500/25 text-cyan-300 border border-cyan-500/40'
+              }`}
+              title={`Emulation Speedhack: ${emulationSpeed}x`}
+            >
+              {emulationSpeed > 1.0 ? <Zap className="w-2.5 h-2.5 text-amber-400" /> : <Clock className="w-2.5 h-2.5 text-cyan-400" />}
+              <span>{emulationSpeed}x</span>
+              <span className="hidden sm:inline">{emulationSpeed > 1.0 ? 'FAST' : 'SLOW'}</span>
+            </span>
+          )}
           <span className="text-[11px] text-zinc-400 hidden sm:inline">
             {fps > 0 ? `${fps} FPS` : '60 FPS'}
           </span>

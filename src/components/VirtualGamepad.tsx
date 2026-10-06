@@ -36,7 +36,7 @@ export const VirtualGamepad: React.FC<VirtualGamepadProps> = ({
   return (
     <div
       id="nes-virtual-controller"
-      className="w-full max-w-[680px] mx-auto bg-zinc-900/95 border-2 border-zinc-800 rounded-2xl p-4 shadow-xl select-none touch-none text-zinc-300"
+      className="w-full max-w-[680px] mx-auto bg-zinc-900 border-2 border-zinc-300 rounded-2xl p-4 shadow-xl select-none touch-none text-zinc-300"
     >
       <div className="flex items-center justify-between border-b border-zinc-800 pb-2 mb-3">
         <div className="flex items-center gap-2">
@@ -172,12 +172,12 @@ export const VirtualGamepad: React.FC<VirtualGamepadProps> = ({
                 type="button"
                 {...createButtonHandlers(NES_BUTTONS.B)}
                 className="w-13 h-13 rounded-full bg-red-600 hover:bg-red-500 active:bg-red-700 active:scale-95 text-white font-black text-sm shadow-lg border-2 border-red-400/30 flex items-center justify-center transition-all cursor-pointer"
-                title="B Button (Run / Fireball)"
+                title="B Button (Run / Fireball) [L]"
               >
                 B
               </button>
               <span className="text-[10px] font-bold text-zinc-400 uppercase mt-1 font-mono">
-                Run / Fire
+                Run [L]
               </span>
             </div>
 
@@ -187,12 +187,12 @@ export const VirtualGamepad: React.FC<VirtualGamepadProps> = ({
                 type="button"
                 {...createButtonHandlers(NES_BUTTONS.A)}
                 className="w-13 h-13 rounded-full bg-red-600 hover:bg-red-500 active:bg-red-700 active:scale-95 text-white font-black text-sm shadow-lg border-2 border-red-400/30 flex items-center justify-center transition-all cursor-pointer"
-                title="A Button (Jump)"
+                title="A Button (Jump) [;]"
               >
                 A
               </button>
               <span className="text-[10px] font-bold text-zinc-400 uppercase mt-1 font-mono">
-                Jump
+                Jump [;]
               </span>
             </div>
           </div>

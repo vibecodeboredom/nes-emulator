@@ -69,3 +69,23 @@ export interface LiveLevelCorruptResult {
   enemiesModified: number;
   message: string;
 }
+
+export interface LevelMergeResult {
+  success: boolean;
+  levelA: { world: number; level: number; name: string };
+  levelB: { world: number; level: number; name: string };
+  objectsMerged: number;
+  enemiesMerged: number;
+  tilesMerged: number;
+  areaTypeA: string;
+  areaTypeB: string;
+  message: string;
+}
+
+export interface SpawnAheadResult {
+  success: boolean;
+  type: 'flag' | 'hammer';
+  col: number;
+  row: number;
+  message: string;
+}

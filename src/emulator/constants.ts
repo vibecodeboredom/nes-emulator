@@ -27,16 +27,14 @@ export const DEFAULT_KEY_MAP: Record<string, { player: number; button: number }>
   KeyA: { player: 1, button: NES_BUTTONS.LEFT },
   KeyD: { player: 1, button: NES_BUTTONS.RIGHT },
 
-  // Primary Action Buttons (Jump: ' and Run: ;)
-  Quote: { player: 1, button: NES_BUTTONS.A },
-  Semicolon: { player: 1, button: NES_BUTTONS.B },
+  // Primary Action Buttons (Jump: ; and Run: L)
+  Semicolon: { player: 1, button: NES_BUTTONS.A }, // Jump
+  KeyL: { player: 1, button: NES_BUTTONS.B },      // Run
 
   // Alternative / Classic Action Buttons
   KeyX: { player: 1, button: NES_BUTTONS.A },
   KeyZ: { player: 1, button: NES_BUTTONS.B },
   KeyY: { player: 1, button: NES_BUTTONS.B }, // QWERTZ / German keyboards
-  KeyJ: { player: 1, button: NES_BUTTONS.B },
-  KeyK: { player: 1, button: NES_BUTTONS.A },
 
   // Turbo Buttons
   KeyC: { player: 1, button: NES_BUTTONS.TURBO_B },

@@ -10,11 +10,12 @@ export class AudioPlayer {
   private capacity = 16384;
   private bufferL = new Float32Array(16384);
   private bufferR = new Float32Array(16384);
-  private readIndex = 0;
+  private readIndexFloat = 0;
   private writeIndex = 0;
   private availableCount = 0;
   private isMuted = false;
   private volumeLevel = 0.5;
+  private playbackSpeed = 1.0;
 
   constructor() {
     // Initialized lazily on user gesture
@@ -51,13 +52,19 @@ export class AudioPlayer {
         const outL = e.outputBuffer.getChannelData(0);
         const outR = e.outputBuffer.getChannelData(1);
         const len = outL.length;
+        const speed = this.playbackSpeed;
 
         for (let i = 0; i < len; i++) {
-          if (this.availableCount > 0) {
-            outL[i] = this.bufferL[this.readIndex];
-            outR[i] = this.bufferR[this.readIndex];
-            this.readIndex = (this.readIndex + 1) % this.capacity;
-            this.availableCount--;
+          if (this.availableCount >= speed) {
+            const idxA = Math.floor(this.readIndexFloat) % this.capacity;
+            const idxB = (idxA + 1) % this.capacity;
+            const frac = this.readIndexFloat - Math.floor(this.readIndexFloat);
+
+            outL[i] = this.bufferL[idxA] * (1 - frac) + this.bufferL[idxB] * frac;
+            outR[i] = this.bufferR[idxA] * (1 - frac) + this.bufferR[idxB] * frac;
+
+            this.readIndexFloat = (this.readIndexFloat + speed) % this.capacity;
+            this.availableCount = Math.max(0, this.availableCount - speed);
           } else {
             outL[i] = 0;
             outR[i] = 0;
@@ -93,9 +100,9 @@ export class AudioPlayer {
   }
 
   public writeSample = (left: number, right: number): void => {
-    // If buffer is overflowing (> 80% capacity), advance read pointer to maintain low latency
-    if (this.availableCount >= this.capacity - 1) {
-      this.readIndex = (this.readIndex + 1) % this.capacity;
+    // If buffer is overflowing (> 85% capacity), advance read pointer to maintain low latency
+    if (this.availableCount >= this.capacity - 2) {
+      this.readIndexFloat = (this.readIndexFloat + 1) % this.capacity;
       this.availableCount--;
     }
 
@@ -104,6 +111,16 @@ export class AudioPlayer {
     this.writeIndex = (this.writeIndex + 1) % this.capacity;
     this.availableCount++;
   };
+
+  public setPlaybackSpeed(speed: number): void {
+    if (typeof speed === 'number' && !isNaN(speed)) {
+      this.playbackSpeed = Math.max(0.1, Math.min(10.0, speed));
+    }
+  }
+
+  public getPlaybackSpeed(): number {
+    return this.playbackSpeed;
+  }
 
   public setVolume(vol: number): void {
     this.volumeLevel = Math.max(0, Math.min(1, vol));
@@ -128,7 +145,7 @@ export class AudioPlayer {
   }
 
   public clearBuffer(): void {
-    this.readIndex = 0;
+    this.readIndexFloat = 0;
     this.writeIndex = 0;
     this.availableCount = 0;
   }

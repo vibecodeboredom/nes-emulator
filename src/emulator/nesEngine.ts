@@ -7,6 +7,8 @@ import {
   PowerupType,
   WarpResult,
   LiveLevelCorruptResult,
+  LevelMergeResult,
+  SpawnAheadResult,
 } from '../types';
 
 export interface NesEngineCallbacks {
@@ -18,8 +20,15 @@ export interface NesEngineCallbacks {
   onQuickCorrupt?: () => void;
   onQuickGarbageCorrupt?: () => void;
   onQuickInfJump?: () => void;
+  onQuickReset?: () => void;
+  onQuickMergeLevelData?: () => void;
+  onQuickSpawnFlag?: () => void;
+  onQuickSpawnHammer?: () => void;
+  onQuickRandomWarp?: () => void;
   onWorldLevelChange?: (info: WorldLevelInfo) => void;
   onAutoEnemyScrambleTick?: (result: LiveLevelCorruptResult) => void;
+  onAutoStreamRandomizeTick?: (result: LiveLevelCorruptResult) => void;
+  onSpeedChange?: (speed: number) => void;
 }
 
 export class NesEngine {
@@ -30,15 +39,19 @@ export class NesEngine {
   private imageData: ImageData | null = null;
   private buf32: Uint32Array | null = null;
   private romBuffer: Uint8Array | null = null;
+  private originalRomBuffer: Uint8Array | null = null;
 
   private isRunning = false;
   private isPaused = false;
   private animationFrameId: number | null = null;
 
   private lastFrameTime = 0;
+  private lastLoopTime = 0;
+  private frameAccumulator = 0;
   private frameCount = 0;
   private fpsTimer = 0;
   private currentFps = 60;
+  private emulationSpeed = 1.0;
 
   private infiniteHealth = false;
   private infiniteJump = false;
@@ -46,6 +59,10 @@ export class NesEngine {
   private autoEnemyScrambleSpeed = 2.0; // Interval in seconds (e.g. 0.5s to 5.0s)
   private autoEnemyScrambleIntensity = 5;
   private autoEnemyScrambleFrameCounter = 0;
+  private autoStreamRandomize = false;
+  private autoStreamRandomizeSpeed = 2.0; // Interval in seconds (e.g. 0.05s to 5.0s)
+  private autoStreamRandomizeIntensity = 5;
+  private autoStreamRandomizeFrameCounter = 0;
   private currentPowerup: PowerupType | null = null;
   private currentRomId: string = 'smb1';
   private inMemorySaveStates = new Map<string, any>();
@@ -89,6 +106,7 @@ export class NesEngine {
 
     const data = romData instanceof Uint8Array ? romData : new Uint8Array(romData);
     this.romBuffer = data;
+    this.originalRomBuffer = new Uint8Array(data);
 
     this.nes = new NES({
       onFrame: (frameBuffer: Uint32Array) => {
@@ -118,6 +136,8 @@ export class NesEngine {
     this.isRunning = true;
     this.isPaused = false;
     this.lastFrameTime = performance.now();
+    this.lastLoopTime = 0;
+    this.frameAccumulator = 0;
     this.fpsTimer = performance.now();
     this.frameCount = 0;
     this.audio.resume();
@@ -130,6 +150,8 @@ export class NesEngine {
   public pause(): void {
     if (!this.isRunning) return;
     this.isPaused = true;
+    this.lastLoopTime = 0;
+    this.frameAccumulator = 0;
     if (this.animationFrameId !== null) {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = null;
@@ -141,6 +163,8 @@ export class NesEngine {
     if (!this.isRunning || !this.isPaused) return;
     this.isPaused = false;
     this.lastFrameTime = performance.now();
+    this.lastLoopTime = 0;
+    this.frameAccumulator = 0;
     this.audio.resume();
     this.loop(performance.now());
     this.callbacks.onStatusChange?.('running');
@@ -157,9 +181,35 @@ export class NesEngine {
   }
 
   public reset(): void {
-    if (!this.nes) return;
-    this.nes.reset();
-    this.audio.clearBuffer();
+    if (this.originalRomBuffer) {
+      this.reloadRom().catch((err) => {
+        console.error('Failed to reload ROM on reset:', err);
+        if (this.nes) {
+          this.nes.reset();
+          this.audio.clearBuffer();
+        }
+      });
+    } else if (this.nes) {
+      this.nes.reset();
+      this.audio.clearBuffer();
+    }
+  }
+
+  public hasOriginalRom(): boolean {
+    return !!this.originalRomBuffer;
+  }
+
+  public async reloadRom(): Promise<boolean> {
+    if (!this.originalRomBuffer) {
+      if (this.romBuffer) {
+        this.originalRomBuffer = new Uint8Array(this.romBuffer);
+      } else {
+        return false;
+      }
+    }
+    const cleanData = new Uint8Array(this.originalRomBuffer);
+    await this.loadRom(cleanData, this.currentRomId);
+    return true;
   }
 
   public stop(): void {
@@ -176,6 +226,23 @@ export class NesEngine {
 
   public getAudioPlayer(): AudioPlayer {
     return this.audio;
+  }
+
+  /**
+   * Configures the Speedhack emulation speed multiplier
+   * @param speed speed multiplier (0.1x to 10.0x; 1.0x is authentic 60 FPS normal speed)
+   */
+  public setSpeed(speed: number): void {
+    if (typeof speed !== 'number' || isNaN(speed)) return;
+    const clamped = Math.max(0.1, Math.min(10.0, speed));
+    const rounded = Math.round(clamped * 100) / 100;
+    this.emulationSpeed = rounded;
+    this.audio.setPlaybackSpeed(rounded);
+    this.callbacks.onSpeedChange?.(rounded);
+  }
+
+  public getSpeed(): number {
+    return this.emulationSpeed;
   }
 
   public buttonDown(player: number, button: number): void {
@@ -280,6 +347,31 @@ export class NesEngine {
       enabled: this.autoEnemyScramble,
       speedSeconds: this.autoEnemyScrambleSpeed,
       intensity: this.autoEnemyScrambleIntensity,
+    };
+  }
+
+  /**
+   * Configures automatic recurring randomization of the level stream ($E7, $E8) and upcoming terrain.
+   * @param enabled whether automatic recurring level stream randomization is active
+   * @param speedSeconds interval between randomizations in seconds (e.g. 0.05s to 5.0s)
+   * @param intensity corruption intensity level (1 to 10)
+   */
+  public setAutoStreamRandomize(enabled: boolean, speedSeconds?: number, intensity?: number): void {
+    this.autoStreamRandomize = enabled;
+    if (typeof speedSeconds === 'number' && !isNaN(speedSeconds)) {
+      this.autoStreamRandomizeSpeed = Math.max(0.01, Math.min(10, speedSeconds));
+    }
+    if (typeof intensity === 'number' && !isNaN(intensity)) {
+      this.autoStreamRandomizeIntensity = Math.max(1, Math.min(10, intensity));
+    }
+    this.autoStreamRandomizeFrameCounter = 0;
+  }
+
+  public getAutoStreamRandomize(): { enabled: boolean; speedSeconds: number; intensity: number } {
+    return {
+      enabled: this.autoStreamRandomize,
+      speedSeconds: this.autoStreamRandomizeSpeed,
+      intensity: this.autoStreamRandomizeIntensity,
     };
   }
 
@@ -486,11 +578,18 @@ export class NesEngine {
     return modifiedBytes;
   }
 
-  public corruptGarbage(bitCount: number = 80): number {
+  public corruptGarbage(powerOrBits: number = 5): number {
     if (!this.nes) return 0;
     let modifiedBits = 0;
 
-    // Changes 80 random bits across NES memory (PPU VRAM tiles/nametables, Sprite OAM, and safe CPU RAM)
+    // Intensity 1..10
+    const p = Math.max(1, Math.min(10, Math.round(powerOrBits <= 10 ? powerOrBits : powerOrBits / 20)));
+
+    // Scale bit count dynamically with power (Power 1..10 maps to 25..250 bits),
+    // or use explicit bit count if > 10 is passed
+    const bitCount = powerOrBits > 10 ? Math.round(powerOrBits) : p * 25;
+
+    // 1. Changes random bits across NES memory (PPU VRAM tiles/nametables, Sprite OAM, and safe CPU RAM)
     for (let i = 0; i < bitCount; i++) {
       const region = Math.random();
       const bitPosition = Math.floor(Math.random() * 8); // 0 to 7
@@ -527,6 +626,57 @@ export class NesEngine {
           this.nes.cpu.mem[addr] &= ~(1 << bitPosition);
         }
         modifiedBits++;
+      }
+    }
+
+    // 2. ALSO UNLEASH THE POWER OF THE GLITCH THINGS WITH THE GARBAGE:
+    // Scale authentic glitch mutations proportional to the Garbage Power level:
+    // A. Sprite OAM Glitch Mutation (Sprites flicker, glitch offsets & attributes)
+    if (this.nes.ppu && this.nes.ppu.spriteMem) {
+      const oam = this.nes.ppu.spriteMem;
+      const oamGlitchCount = Math.floor(p * 3);
+      for (let i = 0; i < oamGlitchCount; i++) {
+        const spriteIdx = Math.floor(Math.random() * 64) * 4;
+        oam[spriteIdx + 1] = (oam[spriteIdx + 1] ^ Math.floor(Math.random() * 256)) & 0xFF;
+        oam[spriteIdx + 2] = (oam[spriteIdx + 2] ^ Math.floor(Math.random() * 0xE3)) & 0xFF;
+        modifiedBits++;
+      }
+    }
+
+    // B. Visible Nametable Tile Glitches (Inverts or randomizes blocks on active screen)
+    if (this.nes.ppu && this.nes.ppu.vramMem) {
+      const vram = this.nes.ppu.vramMem;
+      const tileGlitchCount = Math.floor(p * 4);
+      for (let i = 0; i < tileGlitchCount; i++) {
+        const addr = 0x2000 + Math.floor(Math.random() * 0x0800);
+        vram[addr] = Math.random() < 0.5 ? (vram[addr] ^ 0xFF) & 0xFF : Math.floor(Math.random() * 256);
+        modifiedBits++;
+      }
+    }
+
+    // C. If SMB1 & in active gameplay: mutate upcoming stream & enemy glitch
+    if (this.currentRomId === 'smb1' && this.nes.cpu && this.nes.cpu.mem) {
+      const mem = this.nes.cpu.mem;
+      if (mem[0x0770] === 1 && mem[0x0772] === 3) {
+        // Scramble upcoming level stream objects with glitch garbage objects
+        const areaPtr = (mem[0xE8] << 8) | mem[0xE7];
+        if (areaPtr >= 0x8000 && areaPtr < 0xFF00) {
+          const streamGlitchCount = Math.min(8, Math.floor(p * 1.5));
+          for (let i = 0; i < streamGlitchCount; i += 2) {
+            mem[areaPtr + i] = Math.floor(Math.random() * 256);
+            mem[areaPtr + i + 1] = Math.floor(Math.random() * 256);
+            modifiedBits += 2;
+          }
+        }
+        // Mutate an active enemy into a surprise glitch enemy
+        const enemyPool = [0x00, 0x01, 0x02, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0D, 0x0E, 0x10];
+        for (let slot = 0; slot < 5; slot++) {
+          if (mem[0x000F + slot] !== 0 && Math.random() < 0.5) {
+            mem[0x0016 + slot] = enemyPool[Math.floor(Math.random() * enemyPool.length)];
+            modifiedBits++;
+            break;
+          }
+        }
       }
     }
 
@@ -701,6 +851,523 @@ export class NesEngine {
   }
 
   /**
+   * Helper to resolve SMB1 ROM pointers for any given World and Level
+   */
+  public getLevelPointers(worldInput: number, levelInput: number = 1): {
+    rawWorld: number;
+    rawLevel: number;
+    areaPointer: number;
+    areaType: number;
+    areaTypeName: string;
+    areaDataOffset: number;
+    areaPtr: number;
+    enemyPtr: number;
+  } | null {
+    if (!this.nes || !this.nes.cpu || !this.nes.cpu.mem) return null;
+    const mem = this.nes.cpu.mem;
+
+    let rawWorld: number;
+    if (worldInput === 36) rawWorld = 36;
+    else if (worldInput > 0) rawWorld = (worldInput - 1) & 0xFF;
+    else rawWorld = worldInput & 0xFF;
+
+    let rawLevel: number;
+    if (levelInput > 0) rawLevel = (levelInput - 1) & 0xFF;
+    else rawLevel = levelInput & 0xFF;
+
+    const worldOffset = mem[0x9CB4 + (rawWorld & 0xFF)] || 0;
+    const areaPointer = mem[0x9CBC + ((worldOffset + (rawLevel & 0xFF)) & 0xFF)] || 0x25;
+    const areaType = (areaPointer >> 5) & 0x03;
+    const areaDataOffset = areaPointer & 0x1F;
+
+    const enemyBase = mem[0x9CE0 + areaType] || 0;
+    const enemyIndex = (enemyBase + areaDataOffset) & 0xFF;
+    const enemyLow = mem[0x9CE4 + enemyIndex];
+    const enemyHigh = mem[0x9D06 + enemyIndex];
+    const enemyPtr = ((enemyHigh << 8) | enemyLow) & 0xFFFF;
+
+    const areaBase = mem[0x9D28 + areaType] || 0;
+    const areaIndex = (areaBase + areaDataOffset) & 0xFF;
+    const areaLow = mem[0x9D2C + areaIndex];
+    const areaHigh = mem[0x9D4E + areaIndex];
+    const areaPtr = ((areaHigh << 8) | areaLow) & 0xFFFF;
+
+    const typeNames = ['Water', 'Overworld', 'Underground', 'Castle'];
+    const areaTypeName = typeNames[areaType] || 'Unknown';
+
+    return {
+      rawWorld,
+      rawLevel,
+      areaPointer,
+      areaType,
+      areaTypeName,
+      areaDataOffset,
+      areaPtr,
+      enemyPtr,
+    };
+  }
+
+  private mergeRotationIndex = 0;
+  private readonly MERGE_PAIRS = [
+    { a: { w: 1, l: 1 }, b: { w: 8, l: 4 }, name: 'Overworld + Bowser Castle' },
+    { a: { w: 1, l: 2 }, b: { w: 2, l: 2 }, name: 'Underground + Coral Sea' },
+    { a: { w: 4, l: 1 }, b: { w: 8, l: 3 }, name: 'Lakitu Clouds + Hammer Bro Fortress' },
+    { a: { w: 3, l: 1 }, b: { w: 7, l: 4 }, name: 'Night Bridges + Castle Maze' },
+    { a: { w: 2, l: 1 }, b: { w: 1, l: 4 }, name: 'Desert Pyramids + Fiery Dungeon' },
+    { a: { w: 6, l: 3 }, b: { w: 8, l: 2 }, name: 'High Sky Trees + Paratroopa Run' },
+    { a: { w: 1, l: 1 }, b: { w: 36, l: 1 }, name: 'Mushroom Kingdom + Minus World Void' },
+  ];
+
+  /**
+   * Quick-merge method triggered by Keybind [M]:
+   * Intelligently selects current level as Level A and a contrasting/exciting level as Level B,
+   * then merges both level data streams simultaneously!
+   */
+  public quickMergeLevel(): LevelMergeResult {
+    let curW = 1;
+    let curL = 1;
+    if (this.currentRomId === 'smb1' && this.nes?.cpu?.mem) {
+      const mem = this.nes.cpu.mem;
+      const rawW = mem[0x075F];
+      const rawL = mem[0x0760];
+      if (rawW <= 7) curW = rawW + 1;
+      else if (rawW === 36) curW = 36;
+      if (rawL <= 7) curL = rawL + 1;
+    }
+
+    const pair = this.MERGE_PAIRS[this.mergeRotationIndex % this.MERGE_PAIRS.length];
+    this.mergeRotationIndex++;
+
+    let targetB = pair.b;
+    if (curW === targetB.w && curL === targetB.l) {
+      targetB = pair.a;
+    }
+
+    return this.mergeLevelData(curW, curL, targetB.w, targetB.l, 'interleave');
+  }
+
+  /**
+   * Merges two complete level datas at the same time!
+   * Combines object streams, enemy lists, and live collision/Nametable blocks from Level A and Level B
+   * into the active stage memory simultaneously while the game is running.
+   */
+  public mergeLevelData(
+    worldInputA: number = 1,
+    levelInputA: number = 1,
+    worldInputB: number = 8,
+    levelInputB: number = 4,
+    mode: 'interleave' | 'overlay' | 'chaos' = 'interleave'
+  ): LevelMergeResult {
+    if (!this.nes || !this.nes.cpu || !this.nes.cpu.mem) {
+      return {
+        success: false,
+        levelA: { world: worldInputA, level: levelInputA, name: `World ${worldInputA}-${levelInputA}` },
+        levelB: { world: worldInputB, level: levelInputB, name: `World ${worldInputB}-${levelInputB}` },
+        objectsMerged: 0,
+        enemiesMerged: 0,
+        tilesMerged: 0,
+        areaTypeA: 'Unknown',
+        areaTypeB: 'Unknown',
+        message: 'Emulator memory not initialized',
+      };
+    }
+
+    const mem = this.nes.cpu.mem;
+
+    // Handle generic NES games (non-SMB1)
+    if (this.currentRomId !== 'smb1') {
+      let tilesMerged = 0;
+      const nt0 = this.nes.ppu?.nameTable?.[0];
+      const nt1 = this.nes.ppu?.nameTable?.[1];
+      if (nt0 && nt1 && nt0.tile && nt1.tile) {
+        for (let i = 0; i < 960; i += 2) {
+          nt0.tile[i] = nt1.tile[i];
+          tilesMerged++;
+        }
+      }
+      try {
+        this.renderCanvas();
+      } catch {
+        // ignore
+      }
+      return {
+        success: true,
+        levelA: { world: 1, level: 1, name: 'Nametable 0' },
+        levelB: { world: 1, level: 2, name: 'Nametable 1' },
+        objectsMerged: 0,
+        enemiesMerged: 0,
+        tilesMerged,
+        areaTypeA: 'Layer A',
+        areaTypeB: 'Layer B',
+        message: `Merged screen level buffers (${tilesMerged} tiles interlaced)!`,
+      };
+    }
+
+    // SMB1 Level Data Merging
+    const ptrA = this.getLevelPointers(worldInputA, levelInputA);
+    const ptrB = this.getLevelPointers(worldInputB, levelInputB);
+
+    if (!ptrA || !ptrB) {
+      return {
+        success: false,
+        levelA: { world: worldInputA, level: levelInputA, name: `World ${worldInputA}-${levelInputA}` },
+        levelB: { world: worldInputB, level: levelInputB, name: `World ${worldInputB}-${levelInputB}` },
+        objectsMerged: 0,
+        enemiesMerged: 0,
+        tilesMerged: 0,
+        areaTypeA: 'Unknown',
+        areaTypeB: 'Unknown',
+        message: 'Could not resolve ROM level addresses',
+      };
+    }
+
+    // 1. Extract raw 2-byte object chunks from Level A
+    const objsA: { b0: number; b1: number }[] = [];
+    let curA = ptrA.areaPtr + 2;
+    while (curA < ptrA.areaPtr + 260 && mem[curA] !== 0xFD && mem[curA] !== 0xFE) {
+      objsA.push({ b0: mem[curA], b1: mem[curA + 1] });
+      curA += 2;
+    }
+
+    // 2. Extract raw 2-byte object chunks from Level B
+    const objsB: { b0: number; b1: number }[] = [];
+    let curB = ptrB.areaPtr + 2;
+    while (curB < ptrB.areaPtr + 260 && mem[curB] !== 0xFD && mem[curB] !== 0xFE) {
+      objsB.push({ b0: mem[curB], b1: mem[curB + 1] });
+      curB += 2;
+    }
+
+    // 3. Extract 2-byte enemy chunks from Level A
+    const enemiesA: { b0: number; b1: number }[] = [];
+    let eA = ptrA.enemyPtr;
+    while (eA < ptrA.enemyPtr + 140 && mem[eA] !== 0xFF) {
+      enemiesA.push({ b0: mem[eA], b1: mem[eA + 1] });
+      eA += 2;
+    }
+
+    // 4. Extract 2-byte enemy chunks from Level B
+    const enemiesB: { b0: number; b1: number }[] = [];
+    let eB = ptrB.enemyPtr;
+    while (eB < ptrB.enemyPtr + 140 && mem[eB] !== 0xFF) {
+      enemiesB.push({ b0: mem[eB], b1: mem[eB + 1] });
+      eB += 2;
+    }
+
+    // 5. Merge Object streams according to selected mode
+    const mergedObjs: { b0: number; b1: number }[] = [];
+    const maxObj = Math.max(objsA.length, objsB.length);
+
+    for (let k = 0; k < maxObj; k++) {
+      if (k < objsA.length) {
+        mergedObjs.push({ ...objsA[k] });
+      }
+      if (k < objsB.length) {
+        let b0 = objsB[k].b0;
+        let b1 = objsB[k].b1;
+        if (mode === 'chaos') {
+          // Chaos mode: slightly alter object coordinates for surreal fusion
+          b0 = (b0 + ((k % 3) << 4)) & 0xFF;
+        }
+        mergedObjs.push({ b0, b1 });
+      }
+      // Keep within safe level buffer bounds (max 80 objects = 160 bytes)
+      if (mergedObjs.length >= 75) break;
+    }
+
+    // 6. Merge Enemy streams
+    const mergedEnemies: { b0: number; b1: number }[] = [];
+    const maxE = Math.max(enemiesA.length, enemiesB.length);
+    for (let k = 0; k < maxE; k++) {
+      if (k < enemiesA.length) mergedEnemies.push({ ...enemiesA[k] });
+      if (k < enemiesB.length) mergedEnemies.push({ ...enemiesB[k] });
+      if (mergedEnemies.length >= 35) break;
+    }
+
+    // 7. Identify active current level memory pointers:
+    const currentWorld = mem[0x075F] & 0xFF;
+    const currentArea = mem[0x0760] & 0xFF;
+    const curAreaType = mem[0x074E] & 0x03;
+    const curAreaDataOffset = mem[0x074F] & 0x1F;
+    const curEnemyBase = mem[0x9CE0 + curAreaType] || 0;
+    const curEnemyIndex = (curEnemyBase + curAreaDataOffset) & 0xFF;
+    const curAreaBase = mem[0x9D28 + curAreaType] || 0;
+    const curAreaIndex = (curAreaBase + curAreaDataOffset) & 0xFF;
+
+    const curAreaPtr = ((mem[0x9D4E + curAreaIndex] << 8) | mem[0x9D2C + curAreaIndex]) & 0xFFFF;
+    const curEnemyPtr = ((mem[0x9D06 + curEnemyIndex] << 8) | mem[0x9CE4 + curEnemyIndex]) & 0xFFFF;
+
+    // Use current area pointer if valid, otherwise fallback to ptrA's buffer
+    const targetAreaDest = (curAreaPtr >= 0x8000 && curAreaPtr < 0xFF00) ? curAreaPtr : ptrA.areaPtr;
+    const targetEnemyDest = (curEnemyPtr >= 0x8000 && curEnemyPtr < 0xFF00) ? curEnemyPtr : ptrA.enemyPtr;
+
+    // 8. Write merged object data to active buffer:
+    let writePos = targetAreaDest + 2;
+    for (const obj of mergedObjs) {
+      mem[writePos++] = obj.b0;
+      mem[writePos++] = obj.b1;
+    }
+    mem[writePos] = 0xFD; // Safe SMB1 level object stream terminator
+
+    // 9. Write merged enemy data to active buffer:
+    let eWritePos = targetEnemyDest;
+    for (const enemy of mergedEnemies) {
+      mem[eWritePos++] = enemy.b0;
+      mem[eWritePos++] = enemy.b1;
+    }
+    mem[eWritePos] = 0xFF; // Safe SMB1 enemy list terminator
+
+    // 10. Update active zero-page parser registers:
+    mem[0xE7] = (targetAreaDest + 2) & 0xFF;
+    mem[0xE8] = ((targetAreaDest + 2) >> 8) & 0xFF;
+    mem[0xE9] = targetEnemyDest & 0xFF;
+    mem[0xEA] = (targetEnemyDest >> 8) & 0xFF;
+
+    // 11. Instant Live Visual Merging on Screen:
+    let tilesMerged = 0;
+    if (mem[0x0770] === 1 && mem[0x0772] === 3) {
+      // Mario is in active gameplay!
+      // Stamp characteristic structures of Level B directly ahead on screen
+      const stampRes = this.corruptLiveLevel('screen', 4, true);
+      tilesMerged = stampRes.tilesModified;
+
+      // Morph active on-screen enemy into Level B's signature enemy
+      const signaturePools: Record<number, number[]> = {
+        0: [0x07, 0x08, 0x0B], // Water: Blooper, Bullet Bill, Cheep Cheep
+        1: [0x00, 0x01, 0x06, 0x03], // Overworld: Koopa, Goomba, Flying Koopa
+        2: [0x02, 0x00, 0x06], // Underground: Buzzy Beetle, Koopa, Goomba
+        3: [0x0D, 0x05, 0x02], // Castle: Bowser, Hammer Bro, Buzzy Beetle
+      };
+      const pool = signaturePools[ptrB.areaType] || [0x0D, 0x05, 0x07];
+      for (let slot = 0; slot < 5; slot++) {
+        if (mem[0x000F + slot] !== 0) {
+          mem[0x0016 + slot] = pool[Math.floor(Math.random() * pool.length)];
+          break;
+        }
+      }
+
+      try {
+        this.nes.frame();
+        this.renderCanvas();
+      } catch {
+        // ignore
+      }
+    }
+
+    return {
+      success: true,
+      levelA: { world: worldInputA, level: levelInputA, name: `World ${worldInputA}-${levelInputA}` },
+      levelB: { world: worldInputB, level: levelInputB, name: `World ${worldInputB}-${levelInputB}` },
+      objectsMerged: mergedObjs.length,
+      enemiesMerged: mergedEnemies.length,
+      tilesMerged,
+      areaTypeA: ptrA.areaTypeName,
+      areaTypeB: ptrB.areaTypeName,
+      message: `Merged World ${worldInputA}-${levelInputA} (${ptrA.areaTypeName}) + World ${worldInputB}-${levelInputB} (${ptrB.areaTypeName}): ${mergedObjs.length} objects & ${mergedEnemies.length} enemies fused!`,
+    };
+  }
+
+  /**
+   * Directly stamps a 2x2 NES block (4 8x8 tiles) into PPU NameTable and SMB1 collision RAM
+   */
+  public stampBlock(
+    ntIdx: number,
+    bCol: number,
+    bRow: number,
+    tiles: number[],
+    attrib: number = 8,
+    metatile: number = 0
+  ): void {
+    if (!this.nes?.ppu?.nameTable?.[ntIdx]) return;
+    const nt = this.nes.ppu.nameTable[ntIdx];
+    const vram = this.nes.ppu.vramMem;
+    const mem = this.nes?.cpu?.mem;
+
+    const tCol = (bCol * 2) & 0x1F;
+    const tRow = (bRow * 2) & 0x1F;
+
+    const idxTL = tRow * 32 + tCol;
+    const idxTR = tRow * 32 + tCol + 1;
+    const idxBL = (tRow + 1) * 32 + tCol;
+    const idxBR = (tRow + 1) * 32 + tCol + 1;
+
+    if (nt.tile) {
+      nt.tile[idxTL] = tiles[0];
+      nt.tile[idxTR] = tiles[1];
+      nt.tile[idxBL] = tiles[2];
+      nt.tile[idxBR] = tiles[3];
+    }
+
+    if (nt.attrib) {
+      nt.attrib[idxTL] = attrib;
+      nt.attrib[idxTR] = attrib;
+      nt.attrib[idxBL] = attrib;
+      nt.attrib[idxBR] = attrib;
+    }
+
+    if (typeof this.nes.ppu.nameTableWrite === 'function') {
+      this.nes.ppu.nameTableWrite(ntIdx, idxTL, tiles[0]);
+      this.nes.ppu.nameTableWrite(ntIdx, idxTR, tiles[1]);
+      this.nes.ppu.nameTableWrite(ntIdx, idxBL, tiles[2]);
+      this.nes.ppu.nameTableWrite(ntIdx, idxBR, tiles[3]);
+    }
+
+    if (vram) {
+      const vramBase = ntIdx === 0 ? 0x2000 : 0x2400;
+      vram[vramBase + tRow * 32 + tCol] = tiles[0];
+      vram[vramBase + tRow * 32 + tCol + 1] = tiles[1];
+      vram[vramBase + (tRow + 1) * 32 + tCol] = tiles[2];
+      vram[vramBase + (tRow + 1) * 32 + tCol + 1] = tiles[3];
+    }
+
+    if (this.currentRomId === 'smb1' && mem) {
+      const ramBase = ntIdx === 0 ? 0x0500 : 0x05D0;
+      const metaRow = bRow - 2;
+      if (metaRow >= 0 && metaRow < 13 && bCol >= 0 && bCol < 16) {
+        mem[ramBase + bCol * 13 + metaRow] = metatile;
+      }
+    }
+  }
+
+  /**
+   * Spawns an authentic end-of-level Flagpole with flag 5 blocks in front of Mario!
+   * Mario can run into it to trigger the flagpole slide and victory sequence!
+   */
+  public spawnFlagAhead(blocksAhead: number = 5): SpawnAheadResult {
+    if (!this.nes || !this.nes.cpu || !this.nes.cpu.mem) {
+      return { success: false, type: 'flag', col: 0, row: 0, message: 'Game not running' };
+    }
+
+    const mem = this.nes.cpu.mem;
+    const marioX = mem[0x0086] || 40;
+    const marioCol = Math.max(0, Math.min(15, Math.floor(marioX / 16)));
+    const activeNt = (mem[0x071A] >> 0) & 1;
+
+    let targetCol = marioCol + blocksAhead;
+    let targetNt = activeNt;
+    if (targetCol >= 16) {
+      targetNt = 1 - activeNt;
+      targetCol = targetCol - 16;
+    }
+
+    // Flagpole structure from row 2 (top ball) down to row 11 (solid base block):
+    // 1. Top Ball at row 2
+    this.stampBlock(targetNt, targetCol, 2, [0x24, 0x24, 0x25, 0x26], 8, 0x24);
+
+    // 2. Green/white flag hanging on the left of pole at rows 3 & 4
+    if (targetCol > 0) {
+      this.stampBlock(targetNt, targetCol - 1, 3, [0x27, 0x28, 0x27, 0x28], 8, 0x00);
+      this.stampBlock(targetNt, targetCol - 1, 4, [0x27, 0x28, 0x27, 0x28], 8, 0x00);
+    }
+
+    // 3. Flagpole shaft from row 3 down to row 10 (8 blocks tall)
+    for (let r = 3; r <= 10; r++) {
+      this.stampBlock(targetNt, targetCol, r, [0x25, 0x26, 0x25, 0x26], 8, 0x25);
+    }
+
+    // 4. Solid pedestal base at row 11
+    this.stampBlock(targetNt, targetCol, 11, [97, 98, 99, 100], 4, 0x60);
+
+    // 5. Update level stream pointer object if in active gameplay
+    const areaPtr = (mem[0xE8] << 8) | mem[0xE7];
+    if (areaPtr >= 0x8000 && areaPtr < 0xFF00) {
+      mem[areaPtr] = (2 << 4) | (targetCol & 0x0F);
+      mem[areaPtr + 1] = 0x0B; // SMB1 Flagpole object ID
+    }
+
+    try {
+      this.renderCanvas();
+    } catch {}
+
+    return {
+      success: true,
+      type: 'flag',
+      col: targetCol,
+      row: 11,
+      message: `Flagpole spawned 5 blocks in front of Mario (Column ${targetCol})! Run into it to finish the level!`,
+    };
+  }
+
+  /**
+   * Spawns a Hammer Bro throwing hammers & a flying Hammer projectile 5 blocks in front of Mario!
+   */
+  public spawnHammerAhead(blocksAhead: number = 5): SpawnAheadResult {
+    if (!this.nes || !this.nes.cpu || !this.nes.cpu.mem) {
+      return { success: false, type: 'hammer', col: 0, row: 0, message: 'Game not running' };
+    }
+
+    const mem = this.nes.cpu.mem;
+    const marioX = mem[0x0086] || 40;
+    const marioY = mem[0x00CE] || 176;
+    const marioPage = mem[0x006D] || 0;
+    const marioCol = Math.max(0, Math.min(15, Math.floor(marioX / 16)));
+    const activeNt = (mem[0x071A] >> 0) & 1;
+
+    let targetCol = marioCol + blocksAhead;
+    let targetNt = activeNt;
+    if (targetCol >= 16) {
+      targetNt = 1 - activeNt;
+      targetCol = targetCol - 16;
+    }
+
+    // 1. Calculate world pixel coordinate 5 blocks ahead (80px)
+    const targetPixelX = (marioX + blocksAhead * 16) % 256;
+    const targetPage = marioPage + Math.floor((marioX + blocksAhead * 16) / 256);
+    const targetPixelY = Math.max(80, Math.min(176, marioY - 16));
+
+    // 2. Spawn Hammer Bro in active enemy RAM (Enemy ID 0x05)
+    let slot = 0;
+    for (let s = 0; s < 5; s++) {
+      if (mem[0x000F + s] === 0) {
+        slot = s;
+        break;
+      }
+    }
+
+    mem[0x000F + slot] = 1; // Active enemy
+    mem[0x0016 + slot] = 0x05; // Hammer Bro
+    mem[0x0087 + slot] = targetPixelX; // X pos
+    mem[0x006E + slot] = targetPage; // Page
+    mem[0x00CF + slot] = targetPixelY; // Y pos
+    mem[0x0034 + slot] = 2; // Facing left (towards Mario)
+    mem[0x0420 + slot] = 10; // Prime hammer throw timer
+
+    // 3. Stamp an authentic Hammer Bro hammer item / question block in the air ahead of Mario
+    const hammerTile = 0x29; // SMB1 hammer sprite tile
+    this.stampBlock(targetNt, targetCol, 8, [hammerTile, hammerTile, hammerTile, hammerTile], 8, 0xC1);
+
+    // Also place a breakable brick / powerup block underneath Hammer Bro
+    this.stampBlock(targetNt, targetCol, 10, [69, 69, 71, 71], 4, 0x51);
+
+    // 4. Activate hammer projectile in slot $002A
+    mem[0x002A] = 1; // Hammer projectile active
+    mem[0x002B] = targetPixelX;
+    mem[0x002C] = Math.max(40, targetPixelY - 24);
+
+    try {
+      this.renderCanvas();
+    } catch {}
+
+    return {
+      success: true,
+      type: 'hammer',
+      col: targetCol,
+      row: 8,
+      message: `Hammer Bro & flying Hammer spawned 5 blocks in front of Mario (Column ${targetCol})!`,
+    };
+  }
+
+  /**
+   * Spawns either a Flagpole or Hammer Bro 5 blocks in front of Mario
+   */
+  public spawnEntityAhead(type: 'flag' | 'hammer', blocksAhead: number = 5): SpawnAheadResult {
+    if (type === 'flag') {
+      return this.spawnFlagAhead(blocksAhead);
+    } else {
+      return this.spawnHammerAhead(blocksAhead);
+    }
+  }
+
+  /**
    * Official in-game Warp: Transitions cleanly to any World and Level in SMB1.
    * Loads the area tilemaps, music, palettes, and Mario's starting position with lives screen.
    */
@@ -775,6 +1442,49 @@ export class NesEngine {
       rawLevel,
       message: `Warped cleanly to World ${dispW}-${levelInput}! Loading stage...`,
     };
+  }
+
+  /**
+   * Warps to a random level in SMB1 (Worlds 1-1 to 8-4, plus chance of Minus World & secret levels).
+   * Ensures the new target level is different from the current level.
+   */
+  public warpToRandomLevel(): WarpResult {
+    if (!this.nes || !this.nes.cpu || !this.nes.cpu.mem) {
+      return {
+        success: false,
+        world: 1,
+        level: 1,
+        rawWorld: 0,
+        rawLevel: 0,
+        message: 'Game not running',
+      };
+    }
+
+    const current = this.getCurrentWorldAndLevel();
+    const curW = current ? current.world : 1;
+    const curL = current ? current.level : 1;
+
+    // Standard worlds: 1 to 8, levels 1 to 4
+    // Glitch/Secret worlds: 36 (Minus World), 9, 10, 0
+    const GLITCH_WORLDS = [36, 9, 10, 0, 64];
+
+    let targetW = 1;
+    let targetL = 1;
+    let attempts = 0;
+
+    do {
+      attempts++;
+      const isGlitch = Math.random() < 0.12; // 12% chance for secret/glitch world
+      if (isGlitch) {
+        targetW = GLITCH_WORLDS[Math.floor(Math.random() * GLITCH_WORLDS.length)];
+        targetL = 1;
+      } else {
+        targetW = 1 + Math.floor(Math.random() * 8);
+        targetL = 1 + Math.floor(Math.random() * 4);
+      }
+    } while (attempts < 10 && targetW === curW && targetL === curL);
+
+    return this.warpToLevel(targetW, targetL);
   }
 
   /**
@@ -1255,56 +1965,126 @@ export class NesEngine {
     };
   }
 
+  /**
+   * Dedicated safe auto level stream randomizer runner:
+   * Randomizes upcoming terrain stream ($E7,$E8) and upcoming path blocks
+   * only during active gameplay without causing hangs or resets.
+   */
+  public runAutoStreamRandomizeTick(): LiveLevelCorruptResult {
+    if (!this.nes || !this.nes.cpu || !this.nes.cpu.mem) {
+      return {
+        success: false,
+        mode: 'stream',
+        objectsModified: 0,
+        tilesModified: 0,
+        enemiesModified: 0,
+        message: 'Emulator memory not initialized',
+      };
+    }
+
+    const mem = this.nes.cpu.mem;
+    if (this.currentRomId === 'smb1') {
+      if (mem[0x0770] !== 1 || mem[0x0772] !== 3 || mem[0x000E] !== 8) {
+        return {
+          success: false,
+          mode: 'stream',
+          objectsModified: 0,
+          tilesModified: 0,
+          enemiesModified: 0,
+          message: 'Game is loading or transitioning - safely waiting for active gameplay',
+        };
+      }
+    }
+
+    return this.corruptLiveLevel('stream', this.autoStreamRandomizeIntensity, true);
+  }
+
   private loop = (currentTime: number): void => {
     if (!this.isRunning || this.isPaused) return;
 
     // Check gamepads
     this.pollGamepads();
 
-    // Run emulator frame
+    // Delta-time based frame accumulation for silky smooth arbitrary emulation speed (Speedhack)
+    const delta = this.lastLoopTime > 0
+      ? Math.min(100, Math.max(0, currentTime - this.lastLoopTime))
+      : (1000 / 60);
+    this.lastLoopTime = currentTime;
+
+    // Target frames based on delta and emulation speed
+    this.frameAccumulator += (delta / (1000 / 60)) * this.emulationSpeed;
+    if (this.frameAccumulator > 10) {
+      this.frameAccumulator = 10;
+    }
+
+    const framesToRun = Math.floor(this.frameAccumulator);
+    this.frameAccumulator -= framesToRun;
+
+    // Run emulator frame(s)
     try {
-      if (this.infiniteHealth || this.infiniteJump) {
-        this.applyCheats();
-      }
+      for (let f = 0; f < framesToRun; f++) {
+        if (this.infiniteHealth || this.infiniteJump) {
+          this.applyCheats();
+        }
 
-      this.nes.frame();
+        this.nes.frame();
 
-      if (this.infiniteHealth || this.infiniteJump) {
-        this.applyCheats();
-      }
+        if (this.infiniteHealth || this.infiniteJump) {
+          this.applyCheats();
+        }
 
-      this.renderCanvas();
+        this.frameCount++;
 
-      this.frameCount++;
-
-      // Auto Enemy Scramble check
-      if (this.autoEnemyScramble) {
-        this.autoEnemyScrambleFrameCounter++;
-        const targetFrames = Math.max(1, Math.round(this.autoEnemyScrambleSpeed * 60));
-        if (this.autoEnemyScrambleFrameCounter >= targetFrames) {
-          this.autoEnemyScrambleFrameCounter = 0;
-          try {
-            const res = this.runAutoEnemyScrambleTick();
-            if (res && res.enemiesModified > 0) {
-              this.callbacks.onAutoEnemyScrambleTick?.(res);
+        // Auto Enemy Scramble check
+        if (this.autoEnemyScramble) {
+          this.autoEnemyScrambleFrameCounter++;
+          const targetFrames = Math.max(1, Math.round(this.autoEnemyScrambleSpeed * 60));
+          if (this.autoEnemyScrambleFrameCounter >= targetFrames) {
+            this.autoEnemyScrambleFrameCounter = 0;
+            try {
+              const res = this.runAutoEnemyScrambleTick();
+              if (res && res.enemiesModified > 0) {
+                this.callbacks.onAutoEnemyScrambleTick?.(res);
+              }
+            } catch (e) {
+              console.error('Auto enemy scramble tick error:', e);
             }
-          } catch (e) {
-            console.error('Auto enemy scramble tick error:', e);
+          }
+        }
+
+        // Auto Level Stream Randomize check
+        if (this.autoStreamRandomize) {
+          this.autoStreamRandomizeFrameCounter++;
+          const targetFrames = Math.max(1, Math.round(this.autoStreamRandomizeSpeed * 60));
+          if (this.autoStreamRandomizeFrameCounter >= targetFrames) {
+            this.autoStreamRandomizeFrameCounter = 0;
+            try {
+              const res = this.runAutoStreamRandomizeTick();
+              if (res && res.success && (res.objectsModified > 0 || res.tilesModified > 0)) {
+                this.callbacks.onAutoStreamRandomizeTick?.(res);
+              }
+            } catch (e) {
+              console.error('Auto stream randomize tick error:', e);
+            }
+          }
+        }
+
+        // Check for live world/level changes every 30 frames (twice a second)
+        if (this.frameCount % 30 === 0 && this.callbacks.onWorldLevelChange) {
+          const info = this.getCurrentWorldAndLevel();
+          if (
+            info &&
+            (info.rawWorld !== this.lastReportedWorld || info.rawLevel !== this.lastReportedLevel)
+          ) {
+            this.lastReportedWorld = info.rawWorld;
+            this.lastReportedLevel = info.rawLevel;
+            this.callbacks.onWorldLevelChange(info);
           }
         }
       }
 
-      // Check for live world/level changes every 30 frames (twice a second)
-      if (this.frameCount % 30 === 0 && this.callbacks.onWorldLevelChange) {
-        const info = this.getCurrentWorldAndLevel();
-        if (
-          info &&
-          (info.rawWorld !== this.lastReportedWorld || info.rawLevel !== this.lastReportedLevel)
-        ) {
-          this.lastReportedWorld = info.rawWorld;
-          this.lastReportedLevel = info.rawLevel;
-          this.callbacks.onWorldLevelChange(info);
-        }
+      if (framesToRun > 0) {
+        this.renderCanvas();
       }
 
       const now = performance.now();
@@ -1406,13 +2186,13 @@ export class NesEngine {
     }
 
     // Direct key fallback for robust cross-browser / cross-layout support:
-    // Jump: ' (Quote)
-    if (e.key === "'" || e.key === '"') {
-      return { player: 1, button: 0 }; // NES A
-    }
-    // Run: ; (Semicolon)
+    // Jump: ; (Semicolon)
     if (e.key === ';' || e.key === ':') {
-      return { player: 1, button: 1 }; // NES B
+      return { player: 1, button: 0 }; // NES A (Jump)
+    }
+    // Run: l / L
+    if (e.key === 'l' || e.key === 'L') {
+      return { player: 1, button: 1 }; // NES B (Run)
     }
 
     return null;
@@ -1445,18 +2225,80 @@ export class NesEngine {
       return;
     }
 
-    // Hotkey: Garbage Corruption (KeyH or h/H) - changes 30 bits into random things
+    // Hotkey: Garbage Corruption (KeyH or h/H) - changes bits and glitches things based on Power
     if (e.code === 'KeyH' || e.key === 'h' || e.key === 'H') {
       e.preventDefault();
       this.callbacks.onQuickGarbageCorrupt?.();
       return;
     }
 
-    // Hotkey: Infinite Jump (KeyJ or j/J) - triggers upward mid-air jump boost
+    // Hotkey: Quick Reset / Reload Game (KeyJ, j/J)
     if (e.code === 'KeyJ' || e.key === 'j' || e.key === 'J') {
+      e.preventDefault();
+      this.callbacks.onQuickReset?.();
+      return;
+    }
+
+    // Hotkey: Infinite Jump (KeyK or k/K) - triggers upward mid-air jump boost
+    if (e.code === 'KeyK' || e.key === 'k' || e.key === 'K') {
       e.preventDefault();
       this.triggerInfiniteJump();
       this.callbacks.onQuickInfJump?.();
+      return;
+    }
+
+    // Hotkey: Level Data Merger (KeyM or m/M) - merges two level datas at the same time!
+    if (e.code === 'KeyM' || e.key === 'm' || e.key === 'M') {
+      e.preventDefault();
+      this.callbacks.onQuickMergeLevelData?.();
+      return;
+    }
+
+    // Hotkey: Add Flag 5 blocks ahead (KeyF or f/F)
+    if (e.code === 'KeyF' || e.key === 'f' || e.key === 'F') {
+      e.preventDefault();
+      this.callbacks.onQuickSpawnFlag?.();
+      return;
+    }
+
+    // Hotkey: Warp to a Random Level (KeyT, t/T)
+    if (e.code === 'KeyT' || e.key === 't' || e.key === 'T') {
+      e.preventDefault();
+      this.callbacks.onQuickRandomWarp?.();
+      return;
+    }
+
+    // Hotkey: Add Hammer 5 blocks ahead (KeyU or u/U)
+    if (e.code === 'KeyU' || e.key === 'u' || e.key === 'U') {
+      e.preventDefault();
+      this.callbacks.onQuickSpawnHammer?.();
+      return;
+    }
+
+    // Hotkey: Speedhack Faster (+, =, or NumpadAdd)
+    if (e.key === '+' || e.key === '=' || e.code === 'Equal' || e.code === 'NumpadAdd') {
+      e.preventDefault();
+      const current = this.emulationSpeed;
+      const step = current >= 2.0 ? 0.5 : 0.25;
+      const next = Math.min(5.0, Math.round((current + step) * 100) / 100);
+      this.setSpeed(next);
+      return;
+    }
+
+    // Hotkey: Speedhack Slower (-, _, or NumpadSubtract)
+    if (e.key === '-' || e.key === '_' || e.code === 'Minus' || e.code === 'NumpadSubtract') {
+      e.preventDefault();
+      const current = this.emulationSpeed;
+      const step = current > 2.0 ? 0.5 : 0.25;
+      const next = Math.max(0.25, Math.round((current - step) * 100) / 100);
+      this.setSpeed(next);
+      return;
+    }
+
+    // Hotkey: Speedhack Reset to 1.0x Normal (\ or 0 or Numpad0)
+    if (e.key === '\\' || e.code === 'Backslash' || e.key === '0' || e.code === 'Digit0' || e.code === 'Numpad0') {
+      e.preventDefault();
+      this.setSpeed(1.0);
       return;
     }
 
@@ -1503,4 +2345,5 @@ export class NesEngine {
     this.canvas = null;
     this.ctx = null;
   }
+
 }
